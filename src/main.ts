@@ -23,7 +23,7 @@ const levelRow = (tiles: Record<number, string>) => {
   return row.join("");
 };
 
-// # solid block, X crumbling block, ^ spike, T timed spike, P player, C checkpoint, K key, D locked door, G goal
+// # solid block, X crumbling block, ^ spike, T timed spike, P player, C checkpoint, B chaser button, K key, D locked door, G goal
 const LEVELS: string[][] = [
   // Level 1
   [
@@ -36,7 +36,7 @@ const LEVELS: string[][] = [
     "#" + s(13) + "#" + s(10) + "#",
     "#" + s(13) + "#" + s(10) + "#",
     "#" + s(9) + "#####" + s(10) + "#",
-    "#" + s(7) + "C" + s(17) + "#",
+    "#" + s(7) + "CB" + s(16) + "#",
     "#" + s(5) + "####X" + s(14) + "#",
     "#" + s(5) + "#" + s(6) + "######" + s(7) + "#",
     "#" + s(5) + "#" + s(6) + "#" + s(12) + "#",
@@ -80,6 +80,55 @@ const LEVELS: string[][] = [
     levelRow({ 1: "P", 2: "C", 4: "^", 5: "^", 14: "T", 16: "^", 17: "^", 18: "D", 22: "G" }),
     W,
   ],
+  // Level 4: timed spike gauntlet with crumbling safe spots
+  [
+    W,
+    ...Array(15).fill(E),
+    levelRow({
+      1: "P",
+      3: "^",
+      4: "T",
+      5: "^",
+      7: "X",
+      9: "^",
+      10: "T",
+      11: "^",
+      12: "C",
+      14: "X",
+      16: "^",
+      17: "T",
+      18: "^",
+      19: "X",
+      22: "G",
+    }),
+    W,
+  ],
+  // Level 5: climb to the key, unlock the gate, then clear the final timed spikes
+  [
+    W,
+    ...Array(8).fill(E),
+    levelRow({ 18: "D" }),
+    ...Array(3).fill(levelRow({ 18: "D" })),
+    levelRow({ 12: "K", 18: "D" }),
+    levelRow({ 11: "#", 12: "#", 13: "#", 15: "X", 16: "#", 18: "D" }),
+    levelRow({ 9: "#", 10: "#", 14: "#", 15: "#", 16: "#", 17: "#", 18: "D" }),
+    levelRow({
+      1: "P",
+      3: "C",
+      5: "^",
+      6: "T",
+      7: "^",
+      8: "X",
+      12: "T",
+      14: "^",
+      15: "T",
+      16: "^",
+      18: "D",
+      21: "T",
+      22: "G",
+    }),
+    W,
+  ],
 ];
 
 const SPIKES: Record<string, { angle: number; box: [number, number, number, number] }> = {
@@ -117,6 +166,12 @@ class GameScene extends Phaser.Scene {
   private audioContext: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private backgroundMusic: Phaser.Sound.BaseSound | null = null;
+  private jumpscareVideo: HTMLVideoElement | null = null;
+  private jumpscareStartTimer: Phaser.Time.TimerEvent | null = null;
+  private jumpscareActive = false;
+  private lightingOverlay: Phaser.GameObjects.Rectangle | null = null;
+  private fakeOutImage: Phaser.GameObjects.Image | null = null;
+  private fakeOutCount = 0;
   private player!: Phaser.Physics.Arcade.Sprite;
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>;
@@ -129,6 +184,11 @@ class GameScene extends Phaser.Scene {
   private checkpointPosition: Phaser.Math.Vector2 | null = null;
   private checkpointSprite: Phaser.GameObjects.Image | null = null;
   private checkpointActive = false;
+  private chaserButtonBox: Phaser.Geom.Rectangle | null = null;
+  private chaserButtonPosition: Phaser.Math.Vector2 | null = null;
+  private chaserButtonSprite: Phaser.GameObjects.Image | null = null;
+  private yomSprite: Phaser.GameObjects.Image | null = null;
+  private yomActive = false;
   private keyBox: Phaser.Geom.Rectangle | null = null;
   private keySprite: Phaser.GameObjects.Image | null = null;
   private lockedDoorTiles: Phaser.Physics.Arcade.Image[] = [];
@@ -156,10 +216,13 @@ class GameScene extends Phaser.Scene {
   init(data: { level?: number; deaths?: number }) {
     this.levelIndex = data.level ?? 0;
     this.deaths = data.deaths ?? 0;
+    if (this.levelIndex === 0) this.fakeOutCount = 0;
   }
 
   preload() {
     this.load.audio("backgroundMusic", "/gameboy1.mp3");
+    this.load.image("fakeOut", "/jumpscare.jpg");
+    this.load.image("yom", "/yom.jpg");
   }
 
   private startAudio() {
@@ -183,6 +246,130 @@ class GameScene extends Phaser.Scene {
     }
   }
 
+  private playCheckpointJumpscare() {
+    if (this.jumpscareActive) return;
+
+    this.jumpscareActive = true;
+    this.player.setVelocity(0, 0);
+    this.physics.world.pause();
+    this.sound.setMute(true);
+    if (this.masterGain && this.audioContext) {
+      this.masterGain.gain.setTargetAtTime(0, this.audioContext.currentTime, 0.01);
+    }
+    this.cameras.main.fadeOut(180, 0, 0, 0);
+    this.jumpscareStartTimer = this.time.delayedCall(240, () => {
+      if (this.jumpscareActive) this.startCheckpointJumpscareVideo();
+    });
+  }
+
+  private startCheckpointJumpscareVideo() {
+    const video = document.createElement("video");
+    video.src = "/jumpscare.mp4";
+    video.preload = "auto";
+    video.playsInline = true;
+    video.muted = this.muted;
+    video.volume = 1;
+    video.playbackRate = 1.5;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("aria-label", "Jumpscare video");
+    Object.assign(video.style, {
+      position: "fixed",
+      inset: "0",
+      width: "100vw",
+      height: "100vh",
+      objectFit: "cover",
+      background: "#000",
+      zIndex: "10000",
+    });
+    this.jumpscareVideo = video;
+    document.body.appendChild(video);
+    video.addEventListener(
+      "ended",
+      () => this.finishCheckpointJumpscare(),
+      { once: true },
+    );
+    video.addEventListener(
+      "error",
+      () => {
+        if (this.jumpscareVideo !== video) return;
+        console.error("Unable to load /jumpscare.mp4:", video.error?.message ?? "unknown media error");
+        this.finishCheckpointJumpscare();
+      },
+      { once: true },
+    );
+    video.load();
+    void video.play().catch((error: unknown) => {
+      console.error("Unable to play /jumpscare.mp4:", error);
+      this.finishCheckpointJumpscare();
+    });
+  }
+
+  private finishCheckpointJumpscare() {
+    if (!this.jumpscareActive) return;
+
+    this.jumpscareStartTimer?.remove(false);
+    this.jumpscareStartTimer = null;
+    const video = this.jumpscareVideo;
+    this.jumpscareVideo = null;
+    if (video) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      video.remove();
+    }
+
+    this.jumpscareActive = false;
+    this.physics.world.resume();
+    this.sound.setMute(this.muted);
+    if (this.masterGain && this.audioContext) {
+      this.masterGain.gain.setTargetAtTime(
+        this.muted ? 0 : 0.28,
+        this.audioContext.currentTime,
+        0.03,
+      );
+    }
+    this.cameras.main.fadeIn(180, 0, 0, 0);
+  }
+
+  private scheduleLightingFlicker() {
+    this.time.delayedCall(Phaser.Math.Between(5000, 13000), () => {
+      const overlay = this.lightingOverlay;
+      if (!overlay || this.jumpscareActive || this.won) return;
+
+      const blackout = Phaser.Math.Between(0, 3) === 0;
+      this.tweens.add({
+        targets: overlay,
+        alpha: blackout ? 0.96 : 0.62,
+        duration: blackout ? 25 : 40,
+        hold: blackout ? 280 : 35,
+        yoyo: true,
+        repeat: blackout ? 0 : Phaser.Math.Between(1, 3),
+        repeatDelay: 45,
+        onComplete: () => {
+          overlay.setAlpha(0);
+          if (!this.jumpscareActive && !this.won) this.scheduleLightingFlicker();
+        },
+      });
+    });
+  }
+
+  private scheduleFakeOut() {
+    if (this.fakeOutCount >= 2) return;
+
+    this.time.delayedCall(Phaser.Math.Between(7000, 16000), () => {
+      if (this.jumpscareActive || this.won || this.fakeOutCount >= 2) return;
+      if (Phaser.Math.Between(0, 1) === 0) return;
+
+      this.fakeOutCount++;
+      const image = this.fakeOutImage;
+      if (!image) return;
+      image.setVisible(true).setAlpha(0.95);
+      this.cameras.main.shake(100, 0.008);
+      this.playTone(150, 0.12, 0.24, "sawtooth", 55);
+      this.time.delayedCall(90, () => image.setVisible(false).setAlpha(0));
+    });
+  }
+
   private toggleMute() {
     this.muted = !this.muted;
     if (this.masterGain && this.audioContext) {
@@ -193,6 +380,7 @@ class GameScene extends Phaser.Scene {
       );
     }
     this.sound.setMute(this.muted);
+    if (this.jumpscareVideo) this.jumpscareVideo.muted = this.muted;
     this.updateHud();
   }
 
@@ -296,6 +484,12 @@ class GameScene extends Phaser.Scene {
     g.fillStyle(0x63b8dc).fillTriangle(11, 5, 28, 11, 11, 18);
     g.lineStyle(2, 0xdcebf3).strokeCircle(10, 5, 4);
     g.generateTexture("checkpoint", TILE, TILE);
+    g.clear();
+
+    g.fillStyle(0x253241).fillRect(4, 17, 24, 12);
+    g.fillStyle(0x9caebb).fillRect(7, 13, 18, 8);
+    g.fillStyle(0xed554c).fillCircle(16, 13, 6);
+    g.generateTexture("chaserButton", TILE, TILE);
     g.clear();
 
     g.fillStyle(0xec594e).fillCircle(16, 16, 12);
@@ -447,6 +641,46 @@ class GameScene extends Phaser.Scene {
     return false;
   }
 
+  private activateYom() {
+    if (this.yomActive || !this.chaserButtonPosition) return;
+
+    this.yomActive = true;
+    this.chaserButtonSprite?.setTint(0x858585);
+    this.yomSprite = this.add
+      .image(this.chaserButtonPosition.x - 112, this.chaserButtonPosition.y, "yom")
+      .setDisplaySize(46, 46)
+      .setDepth(4);
+    this.playTone(130, 0.2, 0.28, "sawtooth", 45);
+  }
+
+  private updateYom(delta: number, playerBox: Phaser.Geom.Rectangle): boolean {
+    const yom = this.yomSprite;
+    if (!this.yomActive || !yom) return false;
+
+    if (this.goalBox && Phaser.Geom.Intersects.RectangleToRectangle(playerBox, this.goalBox)) {
+      this.yomActive = false;
+      yom.destroy();
+      this.yomSprite = null;
+      return false;
+    }
+
+    const dx = this.player.x - yom.x;
+    const dy = this.player.y - yom.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > 0) {
+      const step = Math.min(170 * (delta / 1000), distance);
+      yom.x += (dx / distance) * step;
+      yom.y += (dy / distance) * step;
+    }
+
+    const yomBox = new Phaser.Geom.Rectangle(yom.x - 16, yom.y - 16, 32, 32);
+    if (Phaser.Geom.Intersects.RectangleToRectangle(playerBox, yomBox)) {
+      this.respawn(true);
+      return true;
+    }
+    return false;
+  }
+
   create() {
     this.makeTextures();
     this.won = false;
@@ -459,6 +693,13 @@ class GameScene extends Phaser.Scene {
     this.checkpointPosition = null;
     this.checkpointSprite = null;
     this.checkpointActive = false;
+    this.chaserButtonBox = null;
+    this.chaserButtonPosition = null;
+    this.chaserButtonSprite = null;
+    this.yomSprite = null;
+    this.yomActive = false;
+    this.lightingOverlay = null;
+    this.fakeOutImage = null;
     this.keyBox = null;
     this.keySprite = null;
     this.lockedDoorTiles = [];
@@ -472,6 +713,7 @@ class GameScene extends Phaser.Scene {
     this.touchJumpPressed = false;
     this.touchControlsCreated = false;
     this.touchControlObjects = [];
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.finishCheckpointJumpscare());
 
     this.input.once("pointerdown", () => this.startAudio());
     this.input.keyboard!.once("keydown", () => this.startAudio());
@@ -523,6 +765,21 @@ class GameScene extends Phaser.Scene {
           this.checkpointSprite = this.add.image(x + TILE / 2, y + TILE / 2, "checkpoint");
           this.checkpointPosition = new Phaser.Math.Vector2(x + TILE / 2, y + TILE - 14);
           this.checkpointBox = new Phaser.Geom.Rectangle(x + 4, y + 4, TILE - 8, TILE - 8);
+        } else if (ch === "B") {
+          this.chaserButtonSprite = this.add
+            .image(x + TILE / 2, y + TILE / 2, "chaserButton")
+            .setDepth(4);
+          this.chaserButtonPosition = new Phaser.Math.Vector2(x + TILE / 2, y + TILE / 2);
+          this.chaserButtonBox = new Phaser.Geom.Rectangle(x + 8, y + 8, TILE - 16, TILE - 16);
+          this.add
+            .text(x + TILE / 2, y - 2, "TOUCH", {
+              fontFamily: "monospace",
+              fontSize: "8px",
+              color: "#ffb2a8",
+              backgroundColor: "#10151c",
+            })
+            .setOrigin(0.5)
+            .setDepth(4);
         } else if (ch === "G") {
           this.add.image(x + TILE / 2, y + TILE / 2, "goal");
           this.goalBox = new Phaser.Geom.Rectangle(x + 4, y + 2, 24, 28);
@@ -534,13 +791,32 @@ class GameScene extends Phaser.Scene {
       this.addPatrolEnemy(12 * TILE, 8 * TILE - 12, 10 * TILE + 16, 14 * TILE + 16, 90);
     } else if (this.levelIndex === 1) {
       this.addPatrolEnemy(19 * TILE, 11 * TILE - 12, 16 * TILE + 16, 23 * TILE + 16, 110);
-    } else {
+    } else if (this.levelIndex === 2) {
       this.addPatrolEnemy(9 * TILE, 15 * TILE - 12, 8 * TILE + 16, 10 * TILE + 16, 105);
+    } else if (this.levelIndex === 3) {
+      this.addPatrolEnemy(8 * TILE, 15 * TILE - 12, 7 * TILE + 16, 10 * TILE + 16, 125);
+      this.addPatrolEnemy(17 * TILE, 15 * TILE - 12, 16 * TILE + 16, 20 * TILE + 16, 140);
+    } else {
+      this.addPatrolEnemy(11 * TILE, 14 * TILE - 12, 9 * TILE + 16, 13 * TILE + 16, 120);
+      this.addPatrolEnemy(16 * TILE, 14 * TILE - 12, 14 * TILE + 16, 18 * TILE + 16, 145);
     }
 
     this.player = this.physics.add.sprite(this.spawn.x, this.spawn.y, "player");
     this.player.setCollideWorldBounds(true);
     this.physics.add.collider(this.player, solids);
+    this.lightingOverlay = this.add
+      .rectangle(400, 288, 800, 576, 0x000000, 0)
+      .setScrollFactor(0)
+      .setDepth(8);
+    this.fakeOutImage = this.add
+      .image(400, 288, "fakeOut")
+      .setDisplaySize(800, 436)
+      .setScrollFactor(0)
+      .setDepth(30)
+      .setVisible(false)
+      .setAlpha(0);
+    this.scheduleLightingFlicker();
+    this.scheduleFakeOut();
 
     const kb = this.input.keyboard!;
     this.cursors = kb.createCursorKeys();
@@ -669,6 +945,8 @@ class GameScene extends Phaser.Scene {
       this.toggleMute();
     }
 
+    if (this.jumpscareActive) return;
+
     if (this.won) {
       if (Phaser.Input.Keyboard.JustDown(this.keys.r)) this.scene.restart({ level: 0, deaths: 0 });
       return;
@@ -728,6 +1006,11 @@ class GameScene extends Phaser.Scene {
     }
 
     if (this.updatePatrolEnemies(delta, playerBox)) return;
+    if (this.chaserButtonBox && !this.yomActive &&
+      Phaser.Geom.Intersects.RectangleToRectangle(playerBox, this.chaserButtonBox)) {
+      this.activateYom();
+    }
+    if (this.updateYom(delta, playerBox)) return;
     this.updateCrumblePlatforms(time, body);
 
     if (
@@ -740,6 +1023,7 @@ class GameScene extends Phaser.Scene {
       this.spawn.copy(this.checkpointPosition);
       this.checkpointSprite?.setTint(0x72ffb5);
       this.updateHud();
+      this.playCheckpointJumpscare();
     }
 
     if (
